@@ -1,3 +1,22 @@
 [build-system]
-requires = ["setuptools"]
-build-backend = "setuptools.build_
+requires = ["setuptools", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "asimov-pycbc"
+version = "0.1.0"
+description = "Asimov plugin for PyCBC Inference"
+authors = [{ name = "Daniel Williams", email = "daniel.williams@glasgow.ac.uk"  }]
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+	"asimov>=0.5",
+	"pycbc>=2.2",
+	"liquid>=4.0",
+]
+
+[project.entry-points."asimov.pipelines"]
+pycbc = "asimov_pycbc:PyCBC"
+
+[tool.setuptools]
+packages = ["asimov_pycbc"]
