@@ -1,0 +1,17 @@
+# Test blueprint for the real PyCBC production under test. Its own .ini is
+# *not* generated from asimov_pycbc's bundled config_template via this
+# blueprint's metadata -- it is pre-seeded directly into the test event's
+# git repository (see e2e.yml's "Seed the PyCBC ini fixture" step) as a
+# real, hand-validated `pycbc_inference` config using PyCBC's built-in
+# simulated ("fake-strain") Gaussian noise and deliberately reduced sampler
+# settings (dynesty, nlive=50, dlogz=5.0, 2 variable parameters), so the
+# whole run completes for real in well under a minute rather than requiring
+# real strain data or a full-precision (nlive~2000, 14 parameter) run.
+#
+# The config_template/Liquid rendering path is exercised separately by
+# tests/test_pycbc.py, not by this e2e test.
+kind: analysis
+name: pycbc-test
+pipeline: pycbc
+comment: PyCBC end-to-end test production (simulated noise, reduced settings)
+status: ready

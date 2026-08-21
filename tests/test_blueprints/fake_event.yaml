@@ -1,0 +1,9 @@
+# A minimal event for the asimov-pycbc end-to-end test. The production
+# under test runs against pycbc_inference's own built-in simulated
+# ("fake-strain") Gaussian noise, so this doesn't need real GWOSC metadata
+# or strain data, or the separate asimov-gwdata plugin.
+kind: event
+name: FAKE_PYCBC_TEST_EVENT
+interferometers:
+- H1
+event time: 1126259462.4
