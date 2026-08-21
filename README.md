@@ -4,6 +4,8 @@ An [Asimov](https://github.com/asimov-gw/asimov) plugin for running
 [PyCBC Inference](http://pycbc.org/pycbc/latest/html/inference.html)
 parameter estimation.
 
+📚 **[Full documentation and tutorial](https://etive-io.github.io/asimov-pycbc/)**
+
 ## Overview
 
 This plugin enables Asimov to submit and manage `pycbc_inference` jobs for

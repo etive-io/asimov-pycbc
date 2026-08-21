@@ -53,6 +53,7 @@ pycbc = "asimov_pycbc:PyCBC"
 
 [project.urls]
 "Source code" = "https://github.com/etive-io/asimov-pycbc"
+"Documentation" = "https://etive-io.github.io/asimov-pycbc/"
 
 [tool.setuptools]
 packages = ["asimov_pycbc"]
