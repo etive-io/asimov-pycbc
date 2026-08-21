@@ -122,6 +122,17 @@ scheduler, waiting for a real, parseable posterior samples file, and
 confirming the PESummary hand-off behaves correctly whether or not
 `asimov-pesummary` is installed.
 
+`.github/workflows/docs.yml` also lints every `asimov ...` command shown in
+`docs/*.rst` against the live, installed asimov CLI on every pull request
+(`scripts/lint_tutorial_commands.py`), so a renamed subcommand or flag in a
+future asimov release shows up as a CI failure here rather than as a
+tutorial that silently stops working:
+
+```bash
+pip install -e .
+python scripts/lint_tutorial_commands.py
+```
+
 ## Contributing
 
 Contributions welcome! Please submit issues or pull requests to
