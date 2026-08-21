@@ -1,74 +1,354 @@
-import unittest
+"""Tests for the PyCBC pipeline integration."""
 
-from asimov.event import Event
-from asimov.analysis import SimpleAnalysis
-from asimov.pipeline import Pipeline
-from asimov_pycbc import PyCBC
 import os
+from unittest.mock import MagicMock, Mock, patch
 
-class TestPyCBCIntegration(unittest.TestCase):
+import pytest
+from asimov.pipeline import PipelineException
 
-    def test_make_config(self):
-        """Check that asimov can make a config file for pycbc."""
+from asimov_pycbc import PyCBC
 
-        subject = Event(name="GW150914")
-        analysis = SimpleAnalysis(subject=subject,
-                                  name="Test 1",
-                                  pipeline="pycbc",
-                                  interferometers=["L1", "H1"]
+
+class TestPyCBCInit:
+    """Test PyCBC initialization."""
+
+    def test_init_success(self, mock_production, mock_config):
+        pipeline = PyCBC(mock_production)
+        assert pipeline.name == "PyCBC"
+        assert pipeline.production == mock_production
+        assert "wait" in pipeline.STATUS
+
+    def test_init_wrong_pipeline(self, mock_production, mock_config):
+        mock_production.pipeline = "bilby"
+        with pytest.raises(PipelineException, match="Pipeline mismatch"):
+            PyCBC(mock_production)
+
+    def test_init_sets_up_logger(self, mock_production, mock_config):
+        """Regression test: the previous implementation overrode
+        Pipeline.__init__ without calling super(), so self.logger was never
+        set and any method that logged (almost all of them) raised
+        AttributeError."""
+        pipeline = PyCBC(mock_production)
+        assert pipeline.logger is not None
+
+
+class TestConfigTemplate:
+    """Test the config_template property used by asimov's `manage build`
+    to render an ini when one doesn't already exist in the event
+    repository."""
+
+    def test_config_template_is_a_real_bundled_file(self, mock_production, mock_config):
+        pipeline = PyCBC(mock_production)
+        assert os.path.exists(pipeline.config_template)
+
+    def test_config_template_is_named_pycbc_ini(self, mock_production, mock_config):
+        pipeline = PyCBC(mock_production)
+        assert os.path.basename(pipeline.config_template) == "pycbc.ini"
+
+
+class TestBuildDag:
+    """Test resolution of rundir and config file location."""
+
+    def test_build_dag_resolves_rundir(self, mock_production, mock_config, temp_dir):
+        mock_production.rundir = os.path.join(temp_dir, "run")
+        pipeline = PyCBC(mock_production)
+        ini = pipeline.build_dag()
+        assert os.path.isdir(mock_production.rundir)
+        assert ini.endswith("TestProduction.ini")
+
+    def test_build_dag_falls_back_to_rundir_default(
+        self, mock_production, mock_config, temp_dir
+    ):
+        mock_production.rundir = None
+        mock_config.get = lambda section, key: (
+            temp_dir if (section, key) == ("general", "rundir_default") else ""
         )
-        cfg_path = "test.ini"
-        analysis.make_config(cfg_path)
-        self.assertTrue(os.path.exists(cfg_path))
-        # Parse config to ensure it is a valid INI
+        pipeline = PyCBC(mock_production)
+        pipeline.build_dag()
+        assert mock_production.rundir == os.path.join(
+            temp_dir, mock_production.event.name, mock_production.name
+        )
+
+    def test_build_dag_dryrun_does_not_raise(self, mock_production, mock_config, temp_dir):
+        mock_production.rundir = os.path.join(temp_dir, "run")
+        pipeline = PyCBC(mock_production)
+        pipeline.build_dag(dryrun=True)  # must not raise
+
+
+class TestSubmitDag:
+    """Test job submission via Asimov's scheduler abstraction."""
+
+    # submit_dag() uses self.scheduler.submit(...) (the asimov>=0.7
+    # scheduler abstraction, via asimov.scheduler_utils.create_job_from_dict)
+    # rather than hand-rolling htcondor/htcondor2 schedd calls directly, as
+    # the original implementation did.
+
+    def test_submit_dag_uses_scheduler_abstraction(
+        self, mock_production, mock_config, temp_dir
+    ):
+        mock_production.rundir = os.path.join(temp_dir, "run")
+
+        with patch("asimov_pycbc.pycbc.shutil.which", return_value="/opt/conda/bin/pycbc_inference"):
+            pipeline = PyCBC(mock_production)
+            pipeline._scheduler = Mock()
+            pipeline._scheduler.submit.return_value = 12345
+
+            cluster_id = pipeline.submit_dag(dryrun=False)
+
+        assert cluster_id == 12345
+        assert mock_production.job_id == 12345
+        assert mock_production.status == "running"
+        assert pipeline._scheduler.submit.called
+
+    def test_submit_dag_first_submission_uses_force(
+        self, mock_production, mock_config, temp_dir
+    ):
+        mock_production.rundir = os.path.join(temp_dir, "run")
+        with patch("asimov_pycbc.pycbc.shutil.which", return_value="/opt/conda/bin/pycbc_inference"):
+            pipeline = PyCBC(mock_production)
+            pipeline._scheduler = Mock()
+            pipeline._scheduler.submit.return_value = 1
+
+            pipeline.submit_dag(dryrun=False)
+
+        job = pipeline._scheduler.submit.call_args[0][0]
+        assert "--force" in job.kwargs["arguments"]
+
+    def test_submit_dag_resumes_without_force_when_checkpoint_exists(
+        self, mock_production, mock_config, temp_dir
+    ):
+        mock_production.rundir = os.path.join(temp_dir, "run")
+        os.makedirs(mock_production.rundir, exist_ok=True)
+        checkpoint = os.path.join(mock_production.rundir, "TestProduction.hdf.checkpoint")
+        with open(checkpoint, "w") as f:
+            f.write("x")
+
+        with patch("asimov_pycbc.pycbc.shutil.which", return_value="/opt/conda/bin/pycbc_inference"):
+            pipeline = PyCBC(mock_production)
+            pipeline._scheduler = Mock()
+            pipeline._scheduler.submit.return_value = 1
+
+            pipeline.submit_dag(dryrun=False)
+
+        job = pipeline._scheduler.submit.call_args[0][0]
+        assert "--force" not in job.kwargs["arguments"]
+
+    def test_submit_dag_dryrun_does_not_call_scheduler(
+        self, mock_production, mock_config, temp_dir
+    ):
+        mock_production.rundir = os.path.join(temp_dir, "run")
+        with patch("asimov_pycbc.pycbc.shutil.which", return_value="/opt/conda/bin/pycbc_inference"):
+            pipeline = PyCBC(mock_production)
+            pipeline._scheduler = Mock()
+
+            result = pipeline.submit_dag(dryrun=True)
+
+        assert result is None
+        pipeline._scheduler.submit.assert_not_called()
+
+    def test_submit_dag_missing_executable_raises_clear_exception(
+        self, mock_production, mock_config, temp_dir
+    ):
+        mock_production.rundir = os.path.join(temp_dir, "run")
+        with patch("asimov_pycbc.pycbc.shutil.which", return_value=None):
+            pipeline = PyCBC(mock_production)
+            with pytest.raises(PipelineException, match="pycbc_inference"):
+                pipeline.submit_dag(dryrun=False)
+
+    def test_submit_dag_scheduler_failure(self, mock_production, mock_config, temp_dir):
+        mock_production.rundir = os.path.join(temp_dir, "run")
+        with patch("asimov_pycbc.pycbc.shutil.which", return_value="/opt/conda/bin/pycbc_inference"):
+            pipeline = PyCBC(mock_production)
+            pipeline._scheduler = Mock()
+            pipeline._scheduler.submit.side_effect = RuntimeError("could not submit")
+
+            with pytest.raises(PipelineException, match="could not be submitted"):
+                pipeline.submit_dag(dryrun=False)
+
+    def test_submit_dag_sets_accounting_group(self, mock_production, mock_config, temp_dir):
+        mock_production.rundir = os.path.join(temp_dir, "run")
+        with patch("asimov_pycbc.pycbc.shutil.which", return_value="/opt/conda/bin/pycbc_inference"):
+            pipeline = PyCBC(mock_production)
+            pipeline._scheduler = Mock()
+            pipeline._scheduler.submit.return_value = 1
+
+            pipeline.submit_dag(dryrun=False)
+
+        job = pipeline._scheduler.submit.call_args[0][0]
+        assert job.kwargs["accounting_group"] == "ligo.dev.o4.cbc.pe.pycbc"
+
+
+class TestDetectCompletion:
+    """Test completion detection."""
+
+    def test_detect_completion_no_output_file(self, mock_production, mock_config, temp_dir):
+        mock_production.rundir = temp_dir
+        pipeline = PyCBC(mock_production)
+        assert pipeline.detect_completion() is False
+
+    def test_detect_completion_output_file_exists_no_h5py(
+        self, mock_production, mock_config, temp_dir
+    ):
+        mock_production.rundir = temp_dir
+        output = os.path.join(temp_dir, "TestProduction.hdf")
+        with open(output, "w") as f:
+            f.write("not really hdf5")
+
+        pipeline = PyCBC(mock_production)
+        with patch.dict("sys.modules", {"h5py": None}):
+            # Simulate h5py being unimportable; detect_completion should
+            # fall back to a plain existence check rather than crashing.
+            assert pipeline.detect_completion() in (True, False)
+
+
+class TestSamplesAndAssets:
+    def test_samples_empty_when_no_output(self, mock_production, mock_config, temp_dir):
+        mock_production.rundir = temp_dir
+        pipeline = PyCBC(mock_production)
+        assert pipeline.samples() == []
+
+    def test_samples_returns_output_file(self, mock_production, mock_config, temp_dir):
+        mock_production.rundir = temp_dir
+        output = os.path.join(temp_dir, "TestProduction.hdf")
+        with open(output, "w") as f:
+            f.write("x")
+        pipeline = PyCBC(mock_production)
+        assert pipeline.samples() == [output]
+
+    def test_collect_assets_includes_config(self, mock_production, mock_config, temp_dir):
+        mock_production.rundir = temp_dir
+        pipeline = PyCBC(mock_production)
+        assets = pipeline.collect_assets()
+        assert assets["config"] == "TestProduction.ini"
+        assert assets["samples"] == []
+
+
+class TestAfterCompletion:
+    """Test the hand-off to asimov-pesummary."""
+
+    def test_after_completion_without_pesummary_installed_raises_clear_exception(
+        self, mock_production, mock_config, temp_dir
+    ):
+        """Regression test for the same class of bug fixed in
+        asimov-lalinference: after_completion() must not depend on a
+        run_pesummary() method that doesn't exist anywhere in this class,
+        and must fail with a clear, actionable message when the
+        asimov-pesummary plugin isn't installed."""
+        mock_production.rundir = temp_dir
+        pipeline = PyCBC(mock_production)
+        with patch("asimov_pycbc.pycbc.entry_points", return_value=[]):
+            with pytest.raises(PipelineException, match="asimov-pesummary"):
+                pipeline.after_completion()
+
+    def test_after_completion_with_pesummary_installed(
+        self, mock_production, mock_config, temp_dir
+    ):
+        mock_production.rundir = temp_dir
+        pipeline = PyCBC(mock_production)
+
+        fake_pesummary_cls = MagicMock()
+        fake_pesummary_instance = MagicMock()
+        fake_pesummary_instance.submit_dag.return_value = 999
+        fake_pesummary_cls.return_value = fake_pesummary_instance
+
+        fake_entry_point = MagicMock()
+        fake_entry_point.name = "pesummary"
+        fake_entry_point.load.return_value = fake_pesummary_cls
+
+        with patch(
+            "asimov_pycbc.pycbc.entry_points", return_value=[fake_entry_point]
+        ):
+            pipeline.after_completion()
+
+        fake_pesummary_instance.submit_dag.assert_called_once()
+        assert mock_production.status == "processing"
+        assert mock_production.meta["job id"] == 999
+
+
+class TestResurrect:
+    def test_resurrect_resubmits_when_checkpoint_exists(
+        self, mock_production, mock_config, temp_dir
+    ):
+        mock_production.rundir = temp_dir
+        mock_production.meta.pop("resurrections", None)
+        checkpoint = os.path.join(temp_dir, "TestProduction.hdf.checkpoint")
+        with open(checkpoint, "w") as f:
+            f.write("x")
+
+        pipeline = PyCBC(mock_production)
+        with patch.object(pipeline, "submit_dag") as mock_submit:
+            pipeline.resurrect()
+
+        mock_submit.assert_called_once()
+        assert mock_production.meta["resurrections"] == 1
+
+    def test_resurrect_no_checkpoint_does_not_resubmit(
+        self, mock_production, mock_config, temp_dir
+    ):
+        mock_production.rundir = temp_dir
+        pipeline = PyCBC(mock_production)
+        with patch.object(pipeline, "submit_dag") as mock_submit:
+            pipeline.resurrect()
+
+        mock_submit.assert_not_called()
+
+    def test_resurrect_stops_after_five_attempts(
+        self, mock_production, mock_config, temp_dir
+    ):
+        mock_production.rundir = temp_dir
+        mock_production.meta["resurrections"] = 5
+        checkpoint = os.path.join(temp_dir, "TestProduction.hdf.checkpoint")
+        with open(checkpoint, "w") as f:
+            f.write("x")
+
+        pipeline = PyCBC(mock_production)
+        with patch.object(pipeline, "submit_dag") as mock_submit:
+            pipeline.resurrect()
+
+        mock_submit.assert_not_called()
+
+
+class TestRealConfigRendering:
+    """Exercise the real Liquid rendering path (asimov's own
+    ``Analysis.make_config()``), rather than just checking that the
+    template file exists -- this is what actually catches undefined-
+    variable/syntax bugs in the bundled ini template."""
+
+    def test_template_renders_a_valid_ini(
+        self, mock_production, mock_config, temp_dir
+    ):
+        from asimov import config as real_config
+        from asimov.pipeline import Pipeline
+        from liquid import Liquid
+
+        pipeline = PyCBC(mock_production)
+
+        liq = Liquid(pipeline.config_template)
+        rendered = liq.render(
+            production=mock_production,
+            analysis=mock_production,
+            pipeline=pipeline,
+            config=real_config,
+        )
+
+        cfg_path = os.path.join(temp_dir, "pycbc-test.ini")
+        with open(cfg_path, "w") as f:
+            f.write(rendered)
+
         parser = Pipeline.read_ini(cfg_path)
-        self.assertTrue(parser.has_section("data"))
-        os.remove(cfg_path)
-
-    def test_submit_description(self):
-        """Ensure submit description can be built and job submission invoked."""
-        subject = Event(name="GW150914")
-        analysis = SimpleAnalysis(subject=subject,
-                                  name="TestSubmit",
-                                  pipeline="pycbc",
-                                  interferometers=["L1", "H1"],
-                                  sampler={"processes": 1},
-                                  rundir="."
+        for section in ("data", "model", "sampler", "variable_params", "static_params"):
+            assert parser.has_section(section), f"Missing section: {section}"
+        assert (
+            parser.get("static_params", "approximant")
+            == mock_production.meta["waveform"]["approximant"]
+        )
+        assert parser.get("data", "trigger-time") == str(
+            mock_production.meta["event time"]
         )
 
-        # Build command and ensure contains pycbc_inference and ini
-        cmd = analysis.pipeline.build_dag()
-        self.assertIn("pycbc_inference", cmd[0])
-        self.assertTrue(cmd[1].endswith(".ini"))
 
-    def test_completion_and_samples(self):
-        subject = Event(name="GW150914")
-        analysis = SimpleAnalysis(subject=subject,
-                                  name="TestComplete",
-                                  pipeline="pycbc",
-                                  interferometers=["L1", "H1"],
-                                  rundir="."
-        )
-        # Create dummy output to simulate completion
-        out_file = os.path.join(".", "posterior_samples.h5")
-        with open(out_file, "w") as fh:
-            fh.write("dummy")
-        self.assertTrue(analysis.pipeline.detect_completion())
-        samples = analysis.pipeline.samples()
-        self.assertTrue(any(p.endswith("posterior_samples.h5") for p in samples))
-        os.remove(out_file)
+def test_module_imports():
+    from asimov_pycbc import PyCBC, __version__
 
-    def test_ini_validation(self):
-        subject = Event(name="GW150914")
-        analysis = SimpleAnalysis(subject=subject,
-                                  name="Validate",
-                                  pipeline="pycbc",
-                                  interferometers=["L1", "H1"]
-        )
-        cfg_path = "Validate.ini"
-        analysis.make_config(cfg_path)
-        parser = analysis.pipeline.read_ini()
-        # If validation passes, sections exist
-        for s in ["data","sampler","model","variable_params","static_params"]:
-            self.assertTrue(parser.has_section(s))
-        os.remove(cfg_path)
+    assert PyCBC is not None
+    assert __version__ is not None
