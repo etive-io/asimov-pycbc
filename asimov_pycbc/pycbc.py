@@ -35,7 +35,7 @@ class PyCBC(Pipeline):
     """
 
     name = "PyCBC"
-    STATUS = {"wait", "stuck", "stopped", "running", "finished"}
+    STATUS = {"wait", "stuck", "stopped", "running", "processing", "finished"}
 
     def __init__(self, production, category=None):
         super(PyCBC, self).__init__(production, category)
@@ -113,11 +113,17 @@ class PyCBC(Pipeline):
         os.makedirs(self.production.rundir, exist_ok=True)
 
         if self.production.event.repository:
-            ini = self.production.event.repository.find_prods(
+            configs = self.production.event.repository.find_prods(
                 self.production.name, self.category
-            )[0]
+            )
+            if not configs:
+                raise PipelineException(
+                    f"No configuration file found for {self.production.name} "
+                    f"in the event repository's '{self.category}' directory.",
+                    production=self.production.name,
+                )
             ini = os.path.join(
-                self.production.event.repository.directory, self.category, ini
+                self.production.event.repository.directory, self.category, configs[0]
             )
         else:
             ini = f"{self.production.name}.ini"
@@ -282,8 +288,10 @@ class PyCBC(Pipeline):
         Collect all of the log files which have been produced by this
         production and return their contents as a dictionary.
         """
-        logs = glob.glob(f"{self.production.rundir}/*.err") + glob.glob(
-            f"{self.production.rundir}/*.out"
+        logs = (
+            glob.glob(f"{self.production.rundir}/*.err")
+            + glob.glob(f"{self.production.rundir}/*.out")
+            + glob.glob(f"{self.production.rundir}/*.log")
         )
         messages = {}
         for log in logs:
