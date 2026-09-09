@@ -14,9 +14,11 @@ Asimov's entry-point registry -- no extra configuration is required.
   hand-written ``.ini`` already committed to the event repository.
 * Submits ``pycbc_inference`` to an HTCondor or Slurm scheduler via Asimov's
   scheduler-agnostic API.
-* Once the run completes (a real, readable posterior HDF5 file is produced), hands off
-  to the `asimov-pesummary <https://github.com/transientlunatic/asimov-pesummary>`_
-  plugin for post-processing, if it is installed.
+* Once the run completes, advertises its samples (via ``collect_assets()``) for any
+  downstream production that declares a ``needs:`` dependency on it -- for example a
+  `asimov-pesummary <https://github.com/etive-io/asimov-pesummary>`_ post-processing
+  production. This plugin does not submit that job itself; see *Post-processing*
+  below.
 * Resubmits a failed or evicted job so it resumes from ``pycbc_inference``'s own
   checkpoint, rather than restarting from scratch.
 
@@ -126,19 +128,8 @@ runs for real. Swap in real ``data`` metadata (see *Data* below) for an actual a
    Once finished, the posterior samples live at
    ``working/GW150914/pycbc-test/pycbc-test.hdf``.
 
-5. Chain a PESummary post-processing step onto it. With
-   `asimov-pesummary <https://github.com/transientlunatic/asimov-pesummary>`_
-   installed, this happens automatically: as soon as ``pycbc-test`` finishes,
-   ``after_completion()`` looks up the ``pesummary`` pipeline via Asimov's
-   ``asimov.pipelines`` entry-point group and submits a post-processing job for it,
-   without any further action needed on your part. Continue running
-   ``asimov monitor`` to track that job through to completion; its output pages land
-   under Asimov's configured webroot.
-
-   To instead run PESummary as its own explicit production (for example to combine
-   several analyses of the same event -- see ``asimov-pesummary``'s own documentation
-   for its ``SubjectAnalysis`` support), apply a second production that ``needs:`` the
-   first:
+5. Chain a PESummary post-processing step onto it as its own production, with a
+   ``needs:`` dependency on ``pycbc-test``:
 
    .. code-block:: yaml
 
@@ -149,6 +140,11 @@ runs for real. Swap in real ``data`` metadata (see *Data* below) for an actual a
       status: ready
       needs:
         - pycbc-test
+      waveform:
+        approximant: IMRPhenomD
+        reference frequency: 30
+        minimum frequency:
+          H1: 30
       postprocessing:
         pesummary:
           multiprocess: 2
@@ -158,8 +154,28 @@ runs for real. Swap in real ``data`` metadata (see *Data* below) for an actual a
       asimov apply -f pesummary-production.yaml -e GW150914
       asimov manage build submit
 
-   Either way, PESummary reads the raw ``pycbc_inference`` HDF5 output directly --
-   it auto-detects the PyCBC format, no conversion step is needed.
+   You can apply this at any point, even before ``pycbc-test`` has finished --
+   Asimov's own dependency resolution won't actually build and submit
+   ``pycbc-test-pesummary`` until ``pycbc-test`` reaches ``finished``, at which point
+   PESummary picks up its samples through ``pycbc-test``'s ``collect_assets()`` (via
+   ``production._previous_assets()``), with no glue code of any kind needed from this
+   plugin. Keep running ``asimov monitor`` to drive both productions through to
+   completion; PESummary's output pages land under Asimov's configured webroot.
+
+   ``summarypages`` (from the real ``pesummary`` package) needs to be able to
+   ``import pycbc`` to read ``pycbc_inference``'s native HDF5 format, so install
+   ``asimov-pesummary`` into the *same* environment as ``pycbc`` itself -- if it's
+   installed anywhere ``pycbc`` isn't importable, reading the samples will fail with
+   ``Unable to find a posterior samples table``.
+
+   .. note::
+
+      An earlier version of this plugin submitted the PESummary job automatically
+      from ``after_completion()``, by looking up the ``pesummary`` pipeline via
+      Asimov's entry-point registry. That approach is no longer used: this plugin's
+      ``after_completion()`` now only marks the production ``finished`` --
+      post-processing is always expressed as an explicit, dependency-linked
+      production, as above.
 
 Data
 ----
@@ -210,22 +226,20 @@ Status messages
 
 ``finished``
    Applied when normal termination of the pipeline is detected (a real, readable
-   posterior HDF5 file exists).
-
-``processing``
-   Applied while a hand-off to ``asimov-pesummary`` is in progress.
+   posterior HDF5 file exists). This is a terminal state as far as this plugin is
+   concerned -- see *Post-processing* below for what (if anything) happens next.
 
 Post-processing
 ----------------
 
-Once a job completes, ``after_completion()`` looks up the ``pesummary`` pipeline via
-the ``asimov.pipelines`` entry-point group and hands the production off to it. If
-``asimov-pesummary`` is not installed, a clear ``PipelineException`` is raised (rather
-than silently failing) explaining how to install it:
-
-.. code-block:: bash
-
-   pip install asimov-pesummary
+This plugin does not run any post-processing itself, and ``after_completion()``
+does nothing beyond marking the production ``finished``. Instead, post-processing
+(PESummary or otherwise) is expressed as its own, separate production with a
+``needs:`` dependency on the ``pycbc`` production -- see step 5 of the tutorial
+above. Asimov's own dependency resolution is what actually builds and submits that
+production once this one finishes; this plugin only needs to make its samples
+available via ``collect_assets()``, which it always does regardless of whether
+anything ever consumes them.
 
 .. toctree::
    :maxdepth: 2

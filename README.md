@@ -23,11 +23,12 @@ gravitational wave parameter estimation. It provides:
 - **Checkpoint-aware resurrection**: `pycbc_inference` checkpoints its own
   progress; a failed or evicted job is resubmitted so it resumes from that
   checkpoint rather than starting over.
-- **PESummary hand-off**: once a job completes, `after_completion()` hands
-  the resulting samples off to the [asimov-pesummary](https://github.com/transientlunatic/asimov-pesummary)
-  plugin (if installed) for post-processing, the same way
-  [asimov-lalinference](https://github.com/transientlunatic/asimov-lalinference)
-  does.
+- **Dependency-driven post-processing**: once a job completes, its samples are
+  available (via `collect_assets()`) to any downstream production with a
+  `needs:` dependency on it -- for example an
+  [asimov-pesummary](https://github.com/etive-io/asimov-pesummary) production.
+  This plugin doesn't submit that job itself; Asimov's own dependency
+  resolution does.
 
 ## Compatibility
 
@@ -97,14 +98,35 @@ up automatically, without any extra wiring: `data-retrieval -> pycbc ->
 pesummary` is expressed entirely through Asimov's own `needs:` dependency
 mechanism.
 
-### PESummary hand-off
+### Post-processing
 
-When a `pycbc` production completes, `after_completion()` looks for the
-`asimov-pesummary` plugin via the `asimov.pipelines` entry-point group and
-submits a post-processing job for it automatically. If `asimov-pesummary`
-isn't installed, this raises a clear `PipelineException` rather than
-failing with an obscure `AttributeError`; Asimov's monitor loop reports
-this per-analysis without crashing the wider `asimov monitor` run.
+This plugin does not run PESummary (or anything else) itself. When a `pycbc`
+production completes, `after_completion()` only marks it `finished` --
+post-processing is expressed as a separate production with a `needs:`
+dependency on it, e.g.:
+
+```yaml
+kind: analysis
+name: pycbc-test-pesummary
+pipeline: pesummary
+needs:
+  - pycbc-test
+waveform:
+  approximant: IMRPhenomD
+  reference frequency: 30
+  minimum frequency:
+    H1: 30
+postprocessing:
+  pesummary:
+    multiprocess: 2
+```
+
+Asimov's own dependency resolution builds and submits `pycbc-test-pesummary`
+once `pycbc-test` reaches `finished`; PESummary picks up its samples via
+`pycbc-test`'s `collect_assets()` (through `production._previous_assets()`).
+Install [asimov-pesummary](https://github.com/etive-io/asimov-pesummary) into
+the *same* environment as `pycbc` itself -- `summarypages` needs to
+`import pycbc` to read `pycbc_inference`'s native HDF5 format.
 
 ## Testing
 
@@ -118,9 +140,9 @@ pytest
 `.github/workflows/e2e.yml` also runs a genuine end-to-end test: a real
 `pycbc_inference` run (using PyCBC's own simulated `--fake-strain` noise so
 no real strain data is required) submitted through a real HTCondor
-scheduler, waiting for a real, parseable posterior samples file, and
-confirming the PESummary hand-off behaves correctly whether or not
-`asimov-pesummary` is installed.
+scheduler, waiting for a real, parseable posterior samples file -- then a
+real `asimov-pesummary` production, wired up via `needs:`, that consumes
+those samples and produces a real, parseable `summarypages` output.
 
 `.github/workflows/docs.yml` also checks that the subcommand and flags used
 by every `asimov ...` command shown in `docs/*.rst` still exist on the live,

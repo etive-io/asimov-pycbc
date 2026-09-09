@@ -1,7 +1,7 @@
 """Tests for the PyCBC pipeline integration."""
 
 import os
-from unittest.mock import MagicMock, Mock, patch
+from unittest.mock import Mock, patch
 
 import pytest
 from asimov.pipeline import PipelineException
@@ -224,45 +224,42 @@ class TestSamplesAndAssets:
 
 
 class TestAfterCompletion:
-    """Test the hand-off to asimov-pesummary."""
+    """Test completion behaviour.
 
-    def test_after_completion_without_pesummary_installed_raises_clear_exception(
-        self, mock_production, mock_config, temp_dir
-    ):
-        """Regression test for the same class of bug fixed in
-        asimov-lalinference: after_completion() must not depend on a
-        run_pesummary() method that doesn't exist anywhere in this class,
-        and must fail with a clear, actionable message when the
-        asimov-pesummary plugin isn't installed."""
-        mock_production.rundir = temp_dir
-        pipeline = PyCBC(mock_production)
-        with patch("asimov_pycbc.pycbc.entry_points", return_value=[]):
-            with pytest.raises(PipelineException, match="asimov-pesummary"):
-                pipeline.after_completion()
+    ``after_completion()`` deliberately does *not* know anything about
+    PESummary or any other post-processing plugin. Post-processing is
+    expressed as a separate production with a ``needs:`` dependency on this
+    one (see asimov-pesummary), resolved entirely by Asimov's own dependency
+    machinery -- not by this pipeline reaching out and submitting a job for
+    it directly.
+    """
 
-    def test_after_completion_with_pesummary_installed(
+    def test_after_completion_marks_production_finished(
         self, mock_production, mock_config, temp_dir
     ):
         mock_production.rundir = temp_dir
+        mock_production.status = "running"
         pipeline = PyCBC(mock_production)
 
-        fake_pesummary_cls = MagicMock()
-        fake_pesummary_instance = MagicMock()
-        fake_pesummary_instance.submit_dag.return_value = 999
-        fake_pesummary_cls.return_value = fake_pesummary_instance
+        pipeline.after_completion()
 
-        fake_entry_point = MagicMock()
-        fake_entry_point.name = "pesummary"
-        fake_entry_point.load.return_value = fake_pesummary_cls
+        assert mock_production.status == "finished"
 
-        with patch(
-            "asimov_pycbc.pycbc.entry_points", return_value=[fake_entry_point]
-        ):
-            pipeline.after_completion()
+    def test_after_completion_does_not_touch_asimov_pipelines_entry_points(
+        self, mock_production, mock_config, temp_dir
+    ):
+        """Regression test: this must not import/use importlib.metadata's
+        entry_points at all any more -- a previous version of this method
+        looked up the ``pesummary`` pipeline via the ``asimov.pipelines``
+        entry-point group and submitted a job for it directly."""
+        mock_production.rundir = temp_dir
+        pipeline = PyCBC(mock_production)
 
-        fake_pesummary_instance.submit_dag.assert_called_once()
-        assert mock_production.status == "processing"
-        assert mock_production.meta["job id"] == 999
+        with patch("asimov_pycbc.pycbc.PipelineException") as mock_exc:
+            pipeline.after_completion()  # must not raise or need pesummary present
+
+        mock_exc.assert_not_called()
+        assert "job id" not in mock_production.meta
 
 
 class TestResurrect:

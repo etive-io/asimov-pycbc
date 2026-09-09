@@ -1,0 +1,26 @@
+# Test blueprint for the real PESummary production under test, wired to the
+# real PyCBC production (pycbc-test) via `needs:` -- the new,
+# dependency-driven post-processing pattern (see docs/index.rst), replacing
+# the old approach where asimov_pycbc.pycbc.PyCBC.after_completion() looked
+# up and submitted the pesummary pipeline itself.
+#
+# Its own .ini is rendered from asimov-pesummary's bundled config_template
+# (not pre-seeded, unlike pycbc-test's ini) -- its actual behaviour is
+# driven by the explicit `summarypages` CLI flags built from
+# `waveform`/`postprocessing.pesummary` below, and from pycbc-test's real
+# samples via `_previous_assets()`.
+kind: analysis
+name: pycbc-test-pesummary
+pipeline: pesummary
+comment: PESummary end-to-end test production, consuming pycbc-test's real samples via needs:
+status: ready
+needs:
+  - pycbc-test
+waveform:
+  approximant: IMRPhenomD
+  reference frequency: 30
+  minimum frequency:
+    H1: 30
+postprocessing:
+  pesummary:
+    multiprocess: 2

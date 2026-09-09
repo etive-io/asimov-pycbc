@@ -8,6 +8,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Changed
+- `after_completion()` no longer looks up and submits the `pesummary`
+  pipeline itself via the `asimov.pipelines` entry-point group. Asimov's
+  newer convention for chaining pipelines is a separate, explicit
+  production with a `needs:` dependency (resolved by Asimov's own
+  dependency graph, not by the upstream pipeline reaching out and
+  submitting a job for whatever it thinks should run next) -- see
+  [asimov-pesummary](https://github.com/etive-io/asimov-pesummary) and the
+  *Post-processing* section of the docs. `STATUS` no longer includes
+  `processing` (the status this plugin briefly used while an automatic
+  hand-off was in flight); a finished production just stays `finished`.
 - Rewrote the pipeline to target `asimov>=0.7`. The previous implementation
   overrode `Pipeline.__init__` without calling `super().__init__()`, so
   `self.logger` was never set -- every method that logged (almost all of
@@ -35,11 +45,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `config_template` property (`asimov_pycbc/configs/pycbc.ini`), pointing at
   a real bundled Liquid template, so `asimov manage build` can render a
   production's `.ini` directly from ledger metadata.
-- `after_completion()` hands a completed job's samples off to the
-  `asimov-pesummary` plugin (discovered via the `asimov.pipelines`
-  entry-point group), matching `asimov-lalinference`'s approach. Raises a
-  clear `PipelineException` (rather than an opaque failure) when
-  `asimov-pesummary` isn't installed.
+- `collect_assets()` advertises a completed job's samples (and rendered
+  config) for any downstream production that declares a `needs:` dependency
+  on it -- e.g. an [asimov-pesummary](https://github.com/etive-io/asimov-pesummary)
+  post-processing production, resolved entirely by Asimov's own dependency
+  graph. `after_completion()` itself does nothing beyond marking the
+  production `finished`; it has no knowledge of PESummary or any other
+  downstream consumer (see Changed, below, for why this replaced an earlier
+  automatic hand-off).
 - Checkpoint-aware `resurrect()`: `pycbc_inference` checkpoints its own
   progress to `<output-file>.checkpoint`; a failed/evicted job is
   resubmitted without `--force` so it resumes rather than restarting from
@@ -47,10 +60,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A genuine end-to-end test (`.github/workflows/e2e.yml`): a real
   `pycbc_inference` job (dynesty, simulated `--fake-strain` Gaussian noise)
   submitted through a real HTCondor scheduler, waiting for a real,
-  parseable posterior samples file -- not a smoke test. Also
-  regression-checks that the PESummary hand-off fails cleanly (a clear
-  `PipelineException`, not a crash) when `asimov-pesummary` isn't
-  installed.
+  parseable posterior samples file -- not a smoke test. Then a real
+  `asimov-pesummary` production, wired up via `needs:`, that consumes
+  those samples through a genuine `summarypages` run and produces a real,
+  parseable combined posterior file -- exercising the full dependency-driven
+  post-processing hand-off described above, not just the upstream job in
+  isolation.
 - Unit test suite rewritten around mocked `production`/`config` fixtures
   (mirroring the sibling plugins' test style), plus a test that renders
   `configs/pycbc.ini` through the real Liquid engine -- this caught a real
