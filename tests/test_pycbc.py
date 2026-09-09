@@ -245,20 +245,26 @@ class TestAfterCompletion:
 
         assert mock_production.status == "finished"
 
-    def test_after_completion_does_not_touch_asimov_pipelines_entry_points(
+    def test_module_does_not_import_entry_points(self):
+        """Regression test: the module must not import importlib.metadata's
+        entry_points at all any more -- a previous version of after_completion()
+        looked up the ``pesummary`` pipeline via the ``asimov.pipelines``
+        entry-point group and submitted a job for it directly. Asserting the
+        import itself is gone is a direct check; asserting no particular
+        exception was raised (the previous version of this test) would
+        trivially pass even if entry_points() were still called."""
+        import asimov_pycbc.pycbc as pycbc_module
+
+        assert not hasattr(pycbc_module, "entry_points")
+
+    def test_after_completion_does_not_set_job_id(
         self, mock_production, mock_config, temp_dir
     ):
-        """Regression test: this must not import/use importlib.metadata's
-        entry_points at all any more -- a previous version of this method
-        looked up the ``pesummary`` pipeline via the ``asimov.pipelines``
-        entry-point group and submitted a job for it directly."""
         mock_production.rundir = temp_dir
         pipeline = PyCBC(mock_production)
 
-        with patch("asimov_pycbc.pycbc.PipelineException") as mock_exc:
-            pipeline.after_completion()  # must not raise or need pesummary present
+        pipeline.after_completion()
 
-        mock_exc.assert_not_called()
         assert "job id" not in mock_production.meta
 
 
