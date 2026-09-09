@@ -312,11 +312,6 @@ jobs:
           interval: "10"
           working-directory: "e2e_project"
 
-      - name: Run asimov monitor for the PESummary production
-        uses: etive-io/actions/run-asimov-command@v1
-        with:
-          script: cd e2e_project && asimov monitor
-
       - name: Verify the summarypages output is genuinely readable
         uses: etive-io/actions/run-asimov-command@v1
         with:
@@ -331,12 +326,25 @@ jobs:
                 assert 'pycbc-test-pesummary' in groups, f'Expected label missing from {groups}'
             "
 
-      - name: Confirm the PESummary production reached a finished/uploaded status
+      # A single `asimov monitor` call right after the output file appears
+      # isn't reliable: the underlying HTCondor job may not yet be reported
+      # as exited (the file can be fully written moments before the job's
+      # own exit is visible to a status query), so the production can still
+      # read "running" on that first poll -- confirmed directly: a real e2e
+      # run hit exactly this, with a genuinely correct summarypages output
+      # already on disk. Poll for a few cycles instead, matching the retry
+      # pattern asimov-pesummary's own e2e test uses for an analogous
+      # refresh-and-settle wait, rather than asserting on a single call.
+      - name: Wait for the PESummary production to reach a finished/uploaded status
         uses: etive-io/actions/run-asimov-command@v1
         with:
           script: |
             cd e2e_project
-            python3 -c "
+            timeout=120
+            elapsed=0
+            asimov monitor
+            until python3 -c "
+            import sys
             import yaml
             with open('.asimov/ledger.yml') as f:
                 ledger = yaml.safe_load(f)
@@ -344,8 +352,16 @@ jobs:
             production = next(p['pycbc-test-pesummary'] for p in event['productions'] if 'pycbc-test-pesummary' in p)
             status = production.get('status')
             print('pycbc-test-pesummary status:', status)
-            assert status in ('finished', 'uploaded'), f'Unexpected status: {status}'
-            "
+            sys.exit(0 if status in ('finished', 'uploaded') else 1)
+            "; do
+              if [ "$elapsed" -ge "$timeout" ]; then
+                echo "::error::Timed out waiting for pycbc-test-pesummary to reach finished/uploaded"
+                exit 1
+              fi
+              sleep 10
+              elapsed=$((elapsed + 10))
+              asimov monitor || true
+            done
 
       - name: Archive artifacts on failure
         if: failure()
