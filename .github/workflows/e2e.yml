@@ -335,14 +335,23 @@ jobs:
       # already on disk. Poll for a few cycles instead, matching the retry
       # pattern asimov-pesummary's own e2e test uses for an analogous
       # refresh-and-settle wait, rather than asserting on a single call.
+      #
+      # Every `asimov monitor` call below is wrapped in the `timeout`
+      # command, not just bounded by the loop's own elapsed-seconds check --
+      # a real run confirmed why that matters the hard way: an `asimov
+      # monitor` call itself hung indefinitely here (genuinely, for hours,
+      # until the job was force-cancelled -- not merely slow), which a
+      # soft counter checked only *between* loop iterations can never
+      # catch. `timeout` guarantees this step fails within a bounded time
+      # even if `asimov monitor` itself stops returning.
       - name: Wait for the PESummary production to reach a finished/uploaded status
         uses: etive-io/actions/run-asimov-command@v1
         with:
           script: |
             cd e2e_project
-            timeout=120
+            deadline=120
             elapsed=0
-            asimov monitor
+            timeout 60 asimov monitor || true
             until python3 -c "
             import sys
             import yaml
@@ -354,13 +363,13 @@ jobs:
             print('pycbc-test-pesummary status:', status)
             sys.exit(0 if status in ('finished', 'uploaded') else 1)
             "; do
-              if [ "$elapsed" -ge "$timeout" ]; then
+              if [ "$elapsed" -ge "$deadline" ]; then
                 echo "::error::Timed out waiting for pycbc-test-pesummary to reach finished/uploaded"
                 exit 1
               fi
               sleep 10
               elapsed=$((elapsed + 10))
-              asimov monitor || true
+              timeout 60 asimov monitor || true
             done
 
       - name: Archive artifacts on failure
