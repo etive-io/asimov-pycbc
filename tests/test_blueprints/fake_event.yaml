@@ -2,8 +2,22 @@
 # under test runs against pycbc_inference's own built-in simulated
 # ("fake-strain") Gaussian noise, so this doesn't need real GWOSC metadata
 # or strain data, or the separate asimov-gwdata plugin.
+#
+# `waveform` lives here, at the event level, rather than being repeated on
+# individual productions: it's real signal metadata shared by every
+# production for this event, and Analysis.__init__ inherits event-level
+# meta into each production automatically (before that production's own
+# blueprint keys are merged on top). pycbc-test doesn't need it itself --
+# its ini is pre-seeded, not rendered from config_template -- but
+# pycbc-test-pesummary's PESummary._submit_single_analysis() reads
+# waveform.approximant/minimum frequency/reference frequency directly.
 kind: event
 name: FAKE_PYCBC_TEST_EVENT
 interferometers:
 - H1
 event time: 1126259462.4
+waveform:
+  approximant: IMRPhenomD
+  reference frequency: 30
+  minimum frequency:
+    H1: 30

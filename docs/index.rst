@@ -76,10 +76,21 @@ runs for real. Swap in real ``data`` metadata (see *Data* below) for an actual a
       interferometers:
         - H1
       event time: 1126259462.4
+      waveform:
+        approximant: IMRPhenomD
+        reference frequency: 30
+        minimum frequency:
+          H1: 30
 
    .. code-block:: bash
 
       asimov apply -f event.yaml
+
+   ``waveform`` lives here, at the event level, rather than being repeated on each
+   production: it's real signal metadata shared by everything analysing this event,
+   and Asimov inherits event-level meta into every production for it automatically
+   (before that production's own blueprint keys are merged on top) -- so both
+   productions below pick it up with nothing further needed.
 
 3. Apply a ``pycbc`` production. This one uses simulated noise, so it needs no
    upstream data-retrieval step:
@@ -91,9 +102,6 @@ runs for real. Swap in real ``data`` metadata (see *Data* below) for an actual a
       name: pycbc-test
       pipeline: pycbc
       status: ready
-      waveform:
-        approximant: IMRPhenomD
-        reference frequency: 30
       likelihood:
         sample rate: 2048
         minimum frequency:
@@ -140,11 +148,6 @@ runs for real. Swap in real ``data`` metadata (see *Data* below) for an actual a
       status: ready
       needs:
         - pycbc-test
-      waveform:
-        approximant: IMRPhenomD
-        reference frequency: 30
-        minimum frequency:
-          H1: 30
       postprocessing:
         pesummary:
           multiprocess: 2
