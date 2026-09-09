@@ -12,7 +12,7 @@
 kind: analysis
 name: pycbc-test-pesummary
 pipeline: pesummary
-comment: PESummary end-to-end test production, consuming pycbc-test's real samples via needs:
+comment: PESummary end-to-end test production, consuming pycbc-test's real samples via a needs dependency
 status: ready
 needs:
   - pycbc-test
