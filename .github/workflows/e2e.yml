@@ -14,6 +14,18 @@ jobs:
   e2e:
     name: "PyCBC end-to-end test (HTCondor)"
     runs-on: ubuntu-latest
+    # Hard backstop: two real runs hung for the full default 6-hour job
+    # ceiling on the same step (see that step's own comment) despite an
+    # in-script `timeout` guard around the specific command suspected of
+    # hanging -- plain `timeout N cmd` only *sends* SIGTERM after N
+    # seconds, it does not forcibly return if the child ignores or
+    # survives that signal, so it did not actually bound anything. This
+    # job-level timeout is enforced by the Actions runner itself, entirely
+    # outside whatever process is hung, so it bounds runtime regardless of
+    # how any given step misbehaves. The real end-to-end work (real
+    # pycbc_inference run, real needs:-based summarypages hand-off) always
+    # finishes in a few minutes; 30 is a generous multiple of that.
+    timeout-minutes: 30
     container:
       image: htcondor/mini:latest
       options: --privileged
@@ -336,22 +348,27 @@ jobs:
       # pattern asimov-pesummary's own e2e test uses for an analogous
       # refresh-and-settle wait, rather than asserting on a single call.
       #
-      # Every `asimov monitor` call below is wrapped in the `timeout`
-      # command, not just bounded by the loop's own elapsed-seconds check --
-      # a real run confirmed why that matters the hard way: an `asimov
-      # monitor` call itself hung indefinitely here (genuinely, for hours,
-      # until the job was force-cancelled -- not merely slow), which a
-      # soft counter checked only *between* loop iterations can never
-      # catch. `timeout` guarantees this step fails within a bounded time
-      # even if `asimov monitor` itself stops returning.
+      # Two real runs confirmed `asimov monitor` can itself hang here
+      # (genuinely, for the full 6-hour default job ceiling both times, not
+      # merely slow) -- and that plain `timeout N cmd` does NOT bound that:
+      # timeout only *sends* SIGTERM after N seconds, it does not forcibly
+      # return if the child ignores or outlives that signal, so a first fix
+      # using bare `timeout 60 ...` still hung for 6 hours. `--kill-after`
+      # forces a SIGKILL if TERM alone doesn't end it. The real backstop is
+      # this job's own `timeout-minutes: 30` (enforced by the Actions
+      # runner itself, entirely outside this or any other process), so this
+      # step failing cleanly here is a nice-to-have for a faster, clearer
+      # diagnosis, not the only thing standing between a real hang and
+      # another 6-hour run.
       - name: Wait for the PESummary production to reach a finished/uploaded status
+        timeout-minutes: 5
         uses: etive-io/actions/run-asimov-command@v1
         with:
           script: |
             cd e2e_project
             deadline=120
             elapsed=0
-            timeout 60 asimov monitor || true
+            timeout --kill-after=10 60 asimov monitor || true
             until python3 -c "
             import sys
             import yaml
@@ -369,7 +386,7 @@ jobs:
               fi
               sleep 10
               elapsed=$((elapsed + 10))
-              timeout 60 asimov monitor || true
+              timeout --kill-after=10 60 asimov monitor || true
             done
 
       - name: Archive artifacts on failure
