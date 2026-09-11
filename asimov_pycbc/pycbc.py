@@ -4,12 +4,6 @@ import glob
 import importlib.resources
 import os
 import shutil
-import sys
-
-if sys.version_info < (3, 10):
-    from importlib_metadata import entry_points
-else:
-    from importlib.metadata import entry_points
 
 from asimov import config
 from asimov.pipeline import Pipeline, PipelineException
@@ -35,7 +29,7 @@ class PyCBC(Pipeline):
     """
 
     name = "PyCBC"
-    STATUS = {"wait", "stuck", "stopped", "running", "processing", "finished"}
+    STATUS = {"wait", "stuck", "stopped", "running", "finished"}
 
     def __init__(self, production, category=None):
         super(PyCBC, self).__init__(production, category)
@@ -301,28 +295,23 @@ class PyCBC(Pipeline):
 
     def after_completion(self):
         """
-        Run PESummary on the results of this job once it has completed.
+        Mark this production as finished once its job has completed.
 
-        Looks up the ``pesummary`` pipeline via the ``asimov.pipelines``
-        entry-point group (the asimov-pesummary plugin), matching the
-        approach used by the sibling asimov-lalinference plugin.
+        This deliberately does *not* reach out and submit a PESummary (or
+        any other) post-processing job itself. Post-processing is instead
+        expressed as its own, separate production with a ``needs:``
+        dependency on this one (see e.g.
+        `asimov-pesummary <https://github.com/etive-io/asimov-pesummary>`_):
+        Asimov's own dependency resolution builds and submits that
+        production once this one reaches ``finished``, and it picks up
+        this production's samples via ``collect_assets()`` through
+        ``production._previous_assets()``. This matches the pattern used
+        by other post-completion-only pipelines (e.g. the ``FakeCBCPipeline``
+        test pipeline in asimov-pesummary itself), and avoids this plugin
+        needing any knowledge of what -- if anything -- consumes its
+        output.
         """
-        discovered = entry_points(group="asimov.pipelines")
-        for pipeline in discovered:
-            if pipeline.name == "pesummary":
-                pesummary_cls = pipeline.load()
-                break
-        else:
-            raise PipelineException(
-                "PyCBC post-processing requires the asimov-pesummary plugin. "
-                "Install it with `pip install asimov-pesummary`."
-            )
-
-        post_pipeline = pesummary_cls(production=self.production)
-        self.logger.info("Job has completed. Running PE Summary.")
-        cluster = post_pipeline.submit_dag()
-        self.production.meta["job id"] = int(cluster)
-        self.production.status = "processing"
+        super().after_completion()
 
     def resurrect(self):
         """

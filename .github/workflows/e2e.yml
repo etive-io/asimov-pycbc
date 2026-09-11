@@ -14,6 +14,18 @@ jobs:
   e2e:
     name: "PyCBC end-to-end test (HTCondor)"
     runs-on: ubuntu-latest
+    # Hard backstop: two real runs hung for the full default 6-hour job
+    # ceiling on the same step (see that step's own comment) despite an
+    # in-script `timeout` guard around the specific command suspected of
+    # hanging -- plain `timeout N cmd` only *sends* SIGTERM after N
+    # seconds, it does not forcibly return if the child ignores or
+    # survives that signal, so it did not actually bound anything. This
+    # job-level timeout is enforced by the Actions runner itself, entirely
+    # outside whatever process is hung, so it bounds runtime regardless of
+    # how any given step misbehaves. The real end-to-end work (real
+    # pycbc_inference run, real needs:-based summarypages hand-off) always
+    # finishes in a few minutes; 30 is a generous multiple of that.
+    timeout-minutes: 30
     container:
       image: htcondor/mini:latest
       options: --privileged
@@ -225,25 +237,147 @@ jobs:
       # self.logger was never set and every method that logged (almost all
       # of them) raised AttributeError as soon as it ran for real -- masked
       # entirely by a unit test suite that never instantiated the pipeline
-      # through asimov's own machinery. asimov-pesummary is deliberately
-      # *not* installed in this job, so after_completion() should now hit
-      # its "plugin not installed" branch and raise a clear
-      # PipelineException -- which asimov's monitor loop catches
-      # per-analysis and reports without crashing the whole `asimov
-      # monitor` command.
-      - name: Confirm asimov considers the production finished and the
-          post-processing hand-off fails cleanly (asimov-pesummary not installed)
+      # through asimov's own machinery. after_completion() now only marks
+      # the production finished (no pesummary lookup of any kind -- see
+      # below), so this just confirms that transition happened cleanly.
+      - name: Confirm the PyCBC production reached a finished status
         uses: etive-io/actions/run-asimov-command@v1
         with:
           script: |
             cd e2e_project
-            asimov monitor | tee monitor_output.txt
-            grep -qi "pycbc-test" monitor_output.txt
-            if grep -qi "run_pesummary\|AttributeError" monitor_output.txt; then
-              echo "::error::Found an AttributeError (e.g. the missing self.logger bug) in monitor output"
-              exit 1
-            fi
-            grep -qi "requires the asimov-pesummary plugin" monitor_output.txt
+            python3 -c "
+            import yaml
+            with open('.asimov/ledger.yml') as f:
+                ledger = yaml.safe_load(f)
+            event = next(e for e in ledger['events'] if e['name'] == 'FAKE_PYCBC_TEST_EVENT')
+            production = next(p['pycbc-test'] for p in event['productions'] if 'pycbc-test' in p)
+            status = production.get('status')
+            print('pycbc-test status:', status)
+            assert status == 'finished', f'Unexpected status: {status}'
+            "
+
+      # --- Dependency-driven post-processing (needs:) ------------------
+      #
+      # This plugin no longer submits PESummary itself (see
+      # asimov_pycbc.pycbc.PyCBC.after_completion() and docs/index.rst) --
+      # post-processing is instead a separate production with a `needs:`
+      # dependency on pycbc-test, resolved entirely by asimov's own
+      # dependency graph (Event.get_all_latest()). This installs the real
+      # asimov-pesummary plugin and exercises that real hand-off end to end:
+      # a genuine `summarypages` run against pycbc-test's real samples.
+
+      # summarypages needs to `import pycbc` to read pycbc_inference's
+      # native HDF5 format (confirmed directly: without pycbc importable in
+      # the same environment, pesummary's PyCBC reader silently falls back
+      # to a generic loader that can't parse the file and raises "Unable to
+      # find a posterior samples table"). Installing into the same conda
+      # env already used for pycbc_inference keeps pycbc importable here.
+      - name: Install asimov-pesummary for the needs:-based post-processing hand-off
+        run: |
+          CONDA_BASE="$("${CONDA_EXE:-conda}" info --base)"
+          CONDA_PYTHON="${CONDA_BASE}/envs/asimov/bin/python"
+          "$CONDA_PYTHON" -m pip install asimov-pesummary
+          # See setup-pycbc-env's own install step for why this matters: a
+          # restrictive root umask can leave a freshly-installed package's
+          # entry_points.txt unreadable by submituser, silently dropping it
+          # from asimov's plugin discovery rather than erroring.
+          chmod -R a+rX "$CONDA_BASE/envs/asimov"
+          echo "Installed asimov-pesummary from: $("$CONDA_PYTHON" -c 'import asimov_pesummary; print(asimov_pesummary.__file__)')"
+          echo "Installed pesummary from: $("$CONDA_PYTHON" -c 'import pesummary; print(pesummary.__file__)')"
+          echo "Installed summarypages at: $("$CONDA_PYTHON" -c 'import shutil; print(shutil.which("summarypages"))')"
+
+      - name: Diagnose asimov.pipelines entry-point discovery for pesummary as submituser
+        uses: etive-io/actions/run-asimov-command@v1
+        with:
+          script: |
+            python3 -c "
+            from importlib.metadata import entry_points
+            eps = [ep for ep in entry_points(group='asimov.pipelines') if ep.value.startswith('asimov_pesummary')]
+            print('Discovered asimov_pesummary entry points:', eps)
+            for ep in eps:
+                try:
+                    ep.load()
+                    print(f'  {ep.name}: loaded OK')
+                except Exception as e:
+                    print(f'  {ep.name}: FAILED TO LOAD: {e!r}')
+            "
+
+      - name: Add and build the real PESummary production (depends on pycbc-test)
+        uses: etive-io/actions/run-asimov-command@v1
+        with:
+          script: |
+            cd e2e_project
+            asimov apply -f "$GITHUB_WORKSPACE/tests/test_blueprints/pesummary_production.yaml" -e FAKE_PYCBC_TEST_EVENT
+            asimov manage build submit
+
+      # The real completion criterion asimov-pesummary's own
+      # detect_completion_processing() (inherited from the base Pipeline
+      # class) checks for -- reaching it means summarypages genuinely read
+      # pycbc-test's real HDF5 output (via _previous_assets()), generated
+      # real plots, and wrote a real, parseable combined posterior file.
+      - name: Wait for real summarypages output
+        uses: etive-io/actions/wait-for-files@v1
+        with:
+          patterns: "posterior_samples.h5"
+          directory: "pages/FAKE_PYCBC_TEST_EVENT/pycbc-test-pesummary/pesummary/samples"
+          timeout: "300"
+          interval: "10"
+          working-directory: "e2e_project"
+
+      - name: Verify the summarypages output is genuinely readable
+        uses: etive-io/actions/run-asimov-command@v1
+        with:
+          script: |
+            cd e2e_project
+            python3 -c "
+            import h5py
+            path = 'pages/FAKE_PYCBC_TEST_EVENT/pycbc-test-pesummary/pesummary/samples/posterior_samples.h5'
+            with h5py.File(path, 'r') as f:
+                groups = list(f.keys())
+                print('Combined posterior file groups:', groups)
+                assert 'pycbc-test-pesummary' in groups, f'Expected label missing from {groups}'
+            "
+
+      # We deliberately do *not* poll for/assert that pycbc-test-pesummary's
+      # ledger status reaches finished/uploaded. Two real runs showed it
+      # never does, no matter how long or how many times `asimov monitor` is
+      # called -- and that turns out to be a genuine, deterministic bug in
+      # the released asimov-pesummary/asimov, not a timing flake: its
+      # `PESummary` pipeline never overrides `detect_completion()`, so it
+      # falls back to the base `Pipeline.detect_completion()`
+      # (asimov/pipeline.py), which is an unconditional no-op returning
+      # `None`. Once the HTCondor job has exited and asimov is no longer
+      # tracking a job id for it, `asimov monitor`'s no-job-id branch
+      # (`_handle_no_condor_job` in asimov/monitor_states.py) always finds
+      # that falsy, logs "is stuck; attempting a rescue", and calls the
+      # equally no-op `resurrect()` -- which never raises, so the production
+      # just stays "running" forever. (This is also what an earlier version
+      # of this step's own bash loop masked: its `deadline`/`elapsed`
+      # variables were silently blanked by the reusable action's own
+      # `su - submituser <<HEREDOC` wrapping, which expands `$vars` in the
+      # script against the *outer* shell -- where they're unset -- before
+      # the heredoc body ever reaches submituser's shell, so the intended
+      # timeout check always compared two empty strings and never fired.)
+      #
+      # None of that bears on whether *this plugin's* change works: the
+      # file-existence and HDF5-content checks above already prove the real
+      # `needs:`-based hand-off (collect_assets() -> _previous_assets())
+      # produced a genuine, correctly labelled posterior file. This step
+      # just reports the ledger status for visibility.
+      - name: Report the PESummary production's ledger status (non-blocking)
+        uses: etive-io/actions/run-asimov-command@v1
+        with:
+          script: |
+            cd e2e_project
+            timeout --kill-after=10 60 asimov monitor || true
+            python3 -c "
+            import yaml
+            with open('.asimov/ledger.yml') as f:
+                ledger = yaml.safe_load(f)
+            event = next(e for e in ledger['events'] if e['name'] == 'FAKE_PYCBC_TEST_EVENT')
+            production = next(p['pycbc-test-pesummary'] for p in event['productions'] if 'pycbc-test-pesummary' in p)
+            print('pycbc-test-pesummary status:', production.get('status'))
+            " || true
 
       - name: Archive artifacts on failure
         if: failure()

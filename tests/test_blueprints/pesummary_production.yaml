@@ -1,0 +1,24 @@
+# Test blueprint for the real PESummary production under test, wired to the
+# real PyCBC production (pycbc-test) via `needs:` -- the new,
+# dependency-driven post-processing pattern (see docs/index.rst), replacing
+# the old approach where asimov_pycbc.pycbc.PyCBC.after_completion() looked
+# up and submitted the pesummary pipeline itself.
+#
+# Its own .ini is rendered from asimov-pesummary's bundled config_template
+# (not pre-seeded, unlike pycbc-test's ini) -- its actual behaviour is
+# driven by the explicit `summarypages` CLI flags built from
+# `waveform`/`postprocessing.pesummary`, and from pycbc-test's real samples
+# via `_previous_assets()`. `waveform` (approximant/minimum frequency/
+# reference frequency, which PESummary._submit_single_analysis() reads
+# directly) is *not* repeated here -- it's inherited from
+# FAKE_PYCBC_TEST_EVENT's own event-level `waveform` (see fake_event.yaml).
+kind: analysis
+name: pycbc-test-pesummary
+pipeline: pesummary
+comment: PESummary end-to-end test production, consuming pycbc-test's real samples via a needs dependency
+status: ready
+needs:
+  - pycbc-test
+postprocessing:
+  pesummary:
+    multiprocess: 2
